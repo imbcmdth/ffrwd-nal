@@ -47,6 +47,12 @@ to format. And `container::scan`'s `lead_end_nals` and `lead_end_obus`
 stay where they are: finding where a half-read sample's leading NALs
 end is the container reader's own problem, not this crate's.
 
+The call sites are `core/src/{avc,obu,live}.rs`, `rows/src/stream.rs`,
+`container/src/scan.rs` and `tool/src/main.rs`, plus the tests in
+`rows/src/read.rs`, `container/tests/containers.rs` and `tool/tests/`.
+All of them go through the functions above, so wrapping `avc` and `obu`
+is enough to move the package.
+
 A `NalRef` now carries a `pad` offset as well as a `code` offset, and
 `AccessUnit::start` and `end` are the padding offsets rather than the
 start code offsets, so the units still tile a stream that has padding
