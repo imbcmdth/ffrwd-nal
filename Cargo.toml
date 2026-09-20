@@ -7,6 +7,7 @@ edition = "2021"
 # the crate in without a fight.
 rust-version = "1.87"
 license = "Apache-2.0"
+repository = "https://github.com/imbcmdth/ffrwd-nal"
 description = "The byte level of H.264, HEVC and AV1: NAL units, OBUs, SEI messages and the records that frame them."
 
 [lib]

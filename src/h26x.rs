@@ -136,13 +136,17 @@ impl Codec {
 /// One access unit of an Annex B stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccessUnit {
-    /// Where the access unit starts, at its first start code.
+    /// Where the access unit starts: at the first byte the picture's
+    /// own NALs need, which is any zero padding before its first start
+    /// code and then that start code.
     pub start: usize,
-    /// Where it ends, at the next access unit's first start code.
+    /// Where it ends, at the same point in the next access unit, so the
+    /// units tile the stream with nothing left over.
     pub end: usize,
     /// Where an SEI NAL goes: at the start code of the first coded
-    /// slice, which is after the delimiter, the parameter sets and any
-    /// SEI already there.
+    /// slice, which is after the delimiter, the parameter sets, any SEI
+    /// already there, and any padding, so a splice here leaves every
+    /// byte of the stream where it was.
     pub insert_at: usize,
     /// Whether the access unit is a random access point.
     pub keyframe: bool,
@@ -174,10 +178,10 @@ pub fn access_units(annexb: &[u8], codec: Codec) -> Vec<AccessUnit> {
         };
         if out.is_empty() || boundary {
             if let Some(last) = out.last_mut() {
-                last.end = nal.code;
+                last.end = nal.pad;
             }
             out.push(AccessUnit {
-                start: nal.code,
+                start: nal.pad,
                 end: annexb.len(),
                 insert_at: usize::MAX,
                 keyframe: false,

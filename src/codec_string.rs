@@ -2,8 +2,7 @@
 //! WebCodecs configuration and an HLS or DASH manifest all call a codec.
 //!
 //! Only the H.264 spelling is here. The AAC one lives with the audio
-//! configuration it reads, and the HEVC one nothing on this machine
-//! writes yet.
+//! configuration it reads, and the HEVC one is not written yet.
 
 /// The RFC 6381 codec string an `avcC` record spells: the profile, the
 /// constraint flags and the level, which are its bytes 1 through 3. The

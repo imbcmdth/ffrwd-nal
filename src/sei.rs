@@ -515,6 +515,41 @@ mod tests {
     }
 
     #[test]
+    fn an_insert_leaves_the_padding_where_it_was() {
+        // A stream with zero padding between two NALs. The SEI goes in
+        // at the start code, which is after the padding, so the bytes
+        // of the output are the bytes of the input with the SEI NAL
+        // pushed in at one point and nothing moved past anything else.
+        let mut stream = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0xac];
+        stream.extend_from_slice(&[0, 0]); // padding on the SPS
+        stream.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00]);
+        let sei = write_user_data(&a_payload(), Codec::H264);
+        let woven = insert_sei_annexb(&stream, &sei, Codec::H264).expect("woven");
+
+        let at = access_units(&stream, Codec::H264)[0].insert_at;
+        let mut want = stream[..at].to_vec();
+        want.extend_from_slice(&START_CODE);
+        want.extend_from_slice(&sei);
+        want.extend_from_slice(&stream[at..]);
+        assert_eq!(woven, want, "a byte moved that was not the SEI");
+        assert_eq!(
+            &woven[..11],
+            &stream[..11],
+            "the padding still trails the SPS"
+        );
+        assert_eq!(
+            user_data_annexb(&woven, Codec::H264, &UUID),
+            vec![a_payload()]
+        );
+        // And the NALs are the NALs, in order, with one added.
+        let kinds: Vec<Option<u8>> = split_nals(&woven)
+            .iter()
+            .map(|nal| Codec::H264.nal_type(nal))
+            .collect();
+        assert_eq!(kinds, vec![Some(7), Some(6), Some(5)]);
+    }
+
+    #[test]
     fn an_sei_whose_size_overruns_the_nal_gives_up_quietly() {
         // A payload size of 200 with ten bytes behind it. What parsed
         // before it would stand; here nothing did.

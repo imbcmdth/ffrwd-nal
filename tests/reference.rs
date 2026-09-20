@@ -683,33 +683,41 @@ fn the_record_ffmpeg_writes_is_the_record_this_builds() {
 }
 
 #[test]
-fn ffmpegs_annex_b_extradata_pads_its_sps_and_the_record_does_not() {
-    // What a stream really hands a filter out of band, and the one way
-    // it differs from the same parameter sets inside an avcC: ffmpeg's
-    // H.264 demuxer leaves a `trailing_zero_8bits` on the SPS, and its
-    // MP4 muxer takes it off. A scanner here gives one byte to the
-    // start code and the rest to the NAL, so the SPS read out of the
-    // extradata is one byte longer than the record's copy. Nothing
-    // decodes differently for it, and a record built from the wire
-    // extradata carries the byte through.
+fn the_record_built_from_ffmpegs_own_extradata_is_ffmpegs_own_record() {
+    // What a stream really hands a filter out of band, and the reason
+    // the scanner counts padding the way Annex B does. ffmpeg's H.264
+    // demuxer writes a `trailing_zero_8bits` after the SPS of its
+    // extradata and its MP4 muxer does not carry it into the avcC. The
+    // byte belongs to the byte stream and to neither NAL unit, so the
+    // sets read out of the wire extradata are the sets inside the
+    // record, and the record built from them is ffmpeg's own.
     let extradata = data("ref-extradata.h264");
     let avcc = data("ref.avcc");
     let (wire, pps) = parse_parameter_sets(&extradata);
-    let (record, _) = parse_parameter_sets(&avcc_to_annexb_extradata(&avcc).expect("the sets"));
-    assert_eq!(wire[0].len(), record[0].len() + 1);
-    assert_eq!(&wire[0][..record[0].len()], &record[0][..]);
-    assert_eq!(*wire[0].last().expect("a byte"), 0);
+    let (record, record_pps) =
+        parse_parameter_sets(&avcc_to_annexb_extradata(&avcc).expect("the sets"));
+    assert_eq!((wire.len(), pps.len()), (1, 1));
+    assert_eq!(wire, record, "the SPS on the wire is the SPS in the record");
+    assert_eq!(pps, record_pps);
+    assert_eq!(build_avcc(&wire, &pps).expect("an avcC"), avcc);
     assert_eq!(profile_level(&extradata), Some((0x64, 0x0d)));
 
-    // The record built from the wire sets is ffmpeg's apart from that
-    // one byte and the length that counts it.
-    let built = build_avcc(&wire, &pps).expect("an avcC");
-    assert_eq!(built.len(), avcc.len() + 1);
-    assert_eq!(&built[..6], &avcc[..6]);
-    assert_eq!(
-        avcc_to_annexb_extradata(&built).expect("the sets back"),
-        extradata
-    );
+    // The padding is the one byte the record's own Annex B spelling
+    // does not have, and the only thing a reframe drops.
+    let spelled = avcc_to_annexb_extradata(&avcc).expect("the sets");
+    assert_eq!(spelled.len() + 1, extradata.len());
+    assert_eq!(split_nals(&spelled), split_nals(&extradata));
+    for length_size in 2..=4usize {
+        let framed = annexb_to_length_prefixed(&extradata, length_size).expect("a sample");
+        assert_eq!(
+            framed,
+            annexb_to_length_prefixed(&spelled, length_size).expect("a sample")
+        );
+        assert_eq!(
+            length_prefixed_to_annexb(&framed, length_size).expect("annex b"),
+            spelled
+        );
+    }
 }
 
 #[test]

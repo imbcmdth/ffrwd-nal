@@ -3,7 +3,7 @@
 //! repeats out of the SPS, section 7.3.2.1.
 //!
 //! Only those fields are read. Resolution, the VUI, the HRD and the AV1
-//! sequence header are not parsed here, because nothing on this machine
+//! sequence header are not parsed here, because nothing calling this
 //! needs them yet: the geometry a muxer writes comes from the stream's
 //! own header out of band, which is where ffmpeg already put it.
 

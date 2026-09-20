@@ -3,14 +3,14 @@
 //! how to read a payload out of one or put a payload into one without
 //! moving anything else.
 //!
-//! Four ffrwd crates were carrying their own copy of this and the copies
-//! had drifted. What is here is those copies reconciled: one start code
-//! scanner, one emulation prevention pair, one SEI reader and writer,
-//! one OBU reader and writer, one `avcC` builder, one exp-Golomb reader.
-//! Nothing above the byte level is here. There are no boxes, no
-//! containers, no timestamps and no index format: a caller brings its
-//! own UUID or `metadata_type` and this crate finds and places the bytes
-//! that carry it.
+//! The code was consolidated from ffrwd's index and moq packages and
+//! the ffrwd sidecar, which had four copies of it between them: one
+//! start code scanner now, one emulation prevention pair, one SEI
+//! reader and writer, one OBU reader and writer, one `avcC` builder,
+//! one exp-Golomb reader. Nothing above the byte level is here. There
+//! are no boxes, no containers, no timestamps and no index format: a
+//! caller brings its own UUID or `metadata_type` and this crate finds
+//! and places the bytes that carry it.
 //!
 //! The crate has no dependencies, forbids unsafe code, opens no file and
 //! starts no thread, so a wasm module compiles it in and its tests run

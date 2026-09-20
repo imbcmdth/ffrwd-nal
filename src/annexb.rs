@@ -12,61 +12,74 @@ use crate::{Error, Result};
 
 /// The four byte start code a writer here puts before a NAL.
 ///
-/// Three byte codes are read and never written: four is what every
-/// encoder on this machine writes and what makes the offsets of a
+/// Three byte codes are read and never written: four is what the
+/// encoders these crates read write, and what makes the offsets of a
 /// rewritten stream easy to reason about.
 pub const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// One NAL unit's place in an Annex B byte stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NalRef<'a> {
-    /// Where the start code begins, which is where something spliced in
-    /// before this NAL goes.
+    /// Where the bytes between the NAL unit before this one and this one
+    /// begin: the zero padding, if the stream has any, and then the start
+    /// code. The NAL before this one ends here, so `pad` to `end` tiles
+    /// the byte stream.
+    pub pad: usize,
+    /// Where this NAL's own start code begins, its `zero_byte` included.
+    /// Something spliced in before this NAL goes here, which leaves the
+    /// padding trailing the NAL it trailed before.
     pub code: usize,
     /// Where the NAL's own bytes begin.
     pub start: usize,
-    /// Where they end.
+    /// Where they end, which is before any zero byte that pads the way
+    /// to the next start code.
     pub end: usize,
-    /// The NAL, start code removed.
+    /// The NAL, start code and padding removed.
     pub bytes: &'a [u8],
 }
 
 /// The NAL units of an Annex B byte stream, with their offsets.
 ///
-/// Both 3-byte (`00 00 01`) and 4-byte (`00 00 00 01`) start codes cut;
-/// a zero byte directly before a 3-byte code belongs to the code, not
-/// to the NAL before it. Bytes before the first start code are ignored,
-/// as ffmpeg ignores them, and bytes with no start code in them at all
-/// hold no NAL units.
+/// Both 3-byte (`00 00 01`) and 4-byte (`00 00 00 01`) start codes cut.
+/// Bytes before the first start code are ignored, as ffmpeg ignores
+/// them, and bytes with no start code in them at all hold no NAL units.
 ///
-/// One zero belongs to the code and no more. A stream that pads a NAL
-/// with `trailing_zero_8bits` before the next start code, as ffmpeg's
-/// H.264 demuxer does between the parameter sets of its extradata,
-/// leaves those zeroes on the NAL they follow; they are `rbsp` padding
-/// and every reader of a NAL ignores them.
+/// Zero bytes between one NAL unit and the next start code belong to
+/// the byte stream and not to either NAL unit: H.264 Annex B.1.1 and
+/// HEVC Annex B.2.1 spell them `trailing_zero_8bits`, and a NAL unit
+/// cannot end in a zero byte, since its last byte is always the one
+/// carrying `rbsp_trailing_bits` or the escape of a `cabac_zero_word`.
+/// So `end` excludes every such zero, and [`NalRef::pad`] carries the
+/// offset they begin at. ffmpeg's H.264 demuxer writes one of them
+/// between the parameter sets of its extradata, and the SPS read out of
+/// that extradata is the SPS an `avcC` carries, byte for byte.
 pub fn scan_nals(annexb: &[u8]) -> Vec<NalRef<'_>> {
-    let mut codes: Vec<(usize, usize)> = Vec::new();
+    // (pad, code, start) of each NAL, in order.
+    let mut codes: Vec<(usize, usize, usize)> = Vec::new();
     let mut at = 0usize;
     while at + 2 < annexb.len() {
         if annexb[at] == 0 && annexb[at + 1] == 0 && annexb[at + 2] == 1 {
-            let code = if at > 0 && annexb[at - 1] == 0 {
-                at - 1
-            } else {
-                at
-            };
-            codes.push((code, at + 3));
+            let mut pad = at;
+            while pad > 0 && annexb[pad - 1] == 0 {
+                pad -= 1;
+            }
+            // One zero of the run is this code's own `zero_byte`; the
+            // rest padded the NAL before it.
+            let code = if at > pad { at - 1 } else { at };
+            codes.push((pad, code, at + 3));
             at += 3;
         } else {
             at += 1;
         }
     }
     let mut out = Vec::with_capacity(codes.len());
-    for (index, (code, start)) in codes.iter().enumerate() {
+    for (index, (pad, code, start)) in codes.iter().enumerate() {
         let end = match codes.get(index + 1) {
-            Some((next, _)) => (*next).max(*start),
-            None => annexb.len(),
+            Some((next, _, _)) => (*next).max(*start),
+            None => trimmed_end(annexb, *start),
         };
         out.push(NalRef {
+            pad: *pad,
             code: *code,
             start: *start,
             end,
@@ -74,6 +87,17 @@ pub fn scan_nals(annexb: &[u8]) -> Vec<NalRef<'_>> {
         });
     }
     out
+}
+
+/// Where the last NAL unit of a byte stream ends: before the zeroes
+/// that pad the stream out, which belong to it no more than the ones
+/// before a start code do.
+fn trimmed_end(annexb: &[u8], start: usize) -> usize {
+    let mut end = annexb.len();
+    while end > start && annexb[end - 1] == 0 {
+        end -= 1;
+    }
+    end
 }
 
 /// The NAL units of an Annex B byte stream, start codes removed.
@@ -186,6 +210,11 @@ mod tests {
             refs.iter().map(|nal| nal.start).collect::<Vec<_>>(),
             vec![4, 9, 15]
         );
+        // With no padding anywhere, the padding offset is the code.
+        assert_eq!(
+            refs.iter().map(|nal| nal.pad).collect::<Vec<_>>(),
+            vec![0, 6, 11]
+        );
         assert_eq!(refs.last().expect("a NAL").end, annexb.len());
     }
 
@@ -209,15 +238,60 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_before_a_three_byte_code_belongs_to_the_code() {
-        // One zero is the four byte code's own; a second is padding on
-        // the NAL before it, which is what ffmpeg writes between the
-        // parameter sets of its H.264 extradata.
+    fn the_zeroes_before_a_start_code_belong_to_neither_nal() {
+        // One zero is the four byte code's own; a second pads the way
+        // to it, which is what ffmpeg writes between the parameter sets
+        // of its H.264 extradata. Neither is part of a NAL unit.
         let annexb = [0, 0, 0, 1, 0x67, 0xaa, 0, 0, 0, 0, 1, 0x68, 0xbb];
+        assert_eq!(split_nals(&annexb), vec![&[0x67, 0xaa][..], &[0x68, 0xbb]]);
+        let refs = scan_nals(&annexb);
+        // The padding is where the second NAL's bytes begin, and the
+        // start code is where a splice before it goes: the byte between
+        // the two is the one that padded the SPS.
+        assert_eq!((refs[0].start, refs[0].end), (4, 6));
+        assert_eq!((refs[1].pad, refs[1].code, refs[1].start), (6, 7, 11));
+        assert_eq!(refs[0].end, refs[1].pad, "the NALs tile the stream");
+
+        // However many zeroes there are, and wherever they fall.
+        let mut padded = vec![0, 0, 0, 1, 0x67, 0xaa];
+        padded.extend_from_slice(&[0; 6]);
+        padded.extend_from_slice(&[0, 0, 1, 0x68, 0xbb]);
+        padded.extend_from_slice(&[0; 3]);
+        assert_eq!(split_nals(&padded), vec![&[0x67, 0xaa][..], &[0x68, 0xbb]]);
+        let refs = scan_nals(&padded);
+        assert_eq!((refs[0].end, refs[1].pad, refs[1].code), (6, 6, 11));
         assert_eq!(
-            split_nals(&annexb),
-            vec![&[0x67, 0xaa, 0][..], &[0x68, 0xbb]]
+            refs[1].end,
+            padded.len() - 3,
+            "the stream's own trailing zeroes are not the NAL's"
         );
+    }
+
+    #[test]
+    fn padding_survives_a_reframe_only_as_padding() {
+        // The one thing reframing drops: the zeroes between NALs, which
+        // no length-prefixed sample has anywhere to put. Every other
+        // byte comes back.
+        let mut padded = vec![0, 0, 0, 1, 0x67, 0xaa, 0];
+        padded.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xbb, 0, 0]);
+        let clean: Vec<u8> = [
+            &START_CODE[..],
+            &[0x67, 0xaa],
+            &START_CODE[..],
+            &[0x68, 0xbb],
+        ]
+        .concat();
+        for length_size in 1..=4usize {
+            let framed = annexb_to_length_prefixed(&padded, length_size).expect("a sample");
+            assert_eq!(
+                framed,
+                annexb_to_length_prefixed(&clean, length_size).expect("a sample"),
+                "the padding reached the sample"
+            );
+            let back = length_prefixed_to_annexb(&framed, length_size).expect("annex b");
+            assert_eq!(back, clean);
+            assert_eq!(split_nals(&back), split_nals(&padded));
+        }
     }
 
     #[test]
