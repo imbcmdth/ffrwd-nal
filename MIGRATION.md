@@ -37,6 +37,17 @@ become thin wrappers. The format's own constants, `UUID`,
 | `rows::stream::units_in(framing, packet)` | `framing.payloads(packet, SELECT)` |
 | `rows::stream::temporal_id_annexb` | gone, inside `Framing::insert` |
 | `container::scan::units_in` | `Framing::payloads` and `Framing::payloads_in_nal` |
+| `container::framing_of(kind, config)` | `config::framing_of_entry(kind, config)`, from 0.1.1 |
+
+`framing_of_entry` answers the sample entry question the container
+reader kept its own function for, including the `avc3` and `av01`
+entries and the refusal to read a track's samples as Annex B. It is
+stricter than the private copy in one place: a record too short or too
+damaged to declare its width is `Truncated` or `Malformed` rather than
+a width of four, so the reader now says the record is broken where it
+used to carry on with a guess. The `Error::Unsupported` message naming
+the entry belongs to the container crate and stays there, built from
+`UnknownCodec`.
 
 Two things to change in the index crate itself. Its `Error` keeps the
 variants the rest of the format needs and gains a

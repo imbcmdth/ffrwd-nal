@@ -25,8 +25,8 @@ use ffrwd_nal::annexb::{
     annexb_to_length_prefixed, length_prefixed_to_annexb, scan_nals, split_nals, START_CODE,
 };
 use ffrwd_nal::config::{
-    avcc_length_size, avcc_to_annexb_extradata, build_avcc, framing_of, hvcc_length_size,
-    parse_parameter_sets, Framing,
+    avcc_length_size, avcc_to_annexb_extradata, build_avcc, framing_of, framing_of_entry,
+    hvcc_length_size, parse_parameter_sets, Framing,
 };
 use ffrwd_nal::feed::{Feed, StreamKind};
 use ffrwd_nal::h26x::{access_units, Codec};
@@ -680,6 +680,31 @@ fn the_record_ffmpeg_writes_is_the_record_this_builds() {
             length_size: 4
         }
     );
+
+    // The same records read as the sample entries an MP4 would carry
+    // them in, which is the way a container reader asks.
+    for kind in [b"avc1", b"avc3"] {
+        assert_eq!(
+            framing_of_entry(kind, &avcc).expect("a framing"),
+            Framing::LengthPrefixed {
+                codec: Codec::H264,
+                length_size: 4
+            },
+            "{}",
+            String::from_utf8_lossy(kind)
+        );
+    }
+    for kind in [b"hvc1", b"hev1"] {
+        assert_eq!(
+            framing_of_entry(kind, &hvcc).expect("a framing"),
+            Framing::LengthPrefixed {
+                codec: Codec::H265,
+                length_size: 4
+            },
+            "{}",
+            String::from_utf8_lossy(kind)
+        );
+    }
 }
 
 #[test]

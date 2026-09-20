@@ -9,8 +9,15 @@
 //! H.264 record back out of parameter sets the way ffmpeg's own writer
 //! does.
 //!
-//! [`Framing`] is the question a packet filter asks first: are these
-//! packets start-coded or length-prefixed, and how wide is the length.
+//! [`Framing`] is the question a reader asks first: are these packets
+//! start-coded or length-prefixed, and how wide is the length. There
+//! are two ways to ask it, because two callers know different things.
+//! A pipeline's pad has a codec name and whatever the stream declared
+//! out of band, and [`framing_of`] guesses from those the way ffmpeg
+//! does. A container's track has a sample entry, which has already said
+//! the samples are length-prefixed, and [`framing_of_entry`] takes it
+//! at its word and refuses a record it cannot read rather than falling
+//! back to a framing the entry ruled out.
 
 use crate::annexb::{annexb_to_length_prefixed, split_length_prefixed, split_nals, START_CODE};
 use crate::h26x::{access_units, Codec, H264_PPS, H264_SPS};
@@ -183,9 +190,18 @@ pub const CODECS: &[&str] = &["h264", "hevc", "av1"];
 /// the same test ffmpeg makes of the same bytes. A name this crate has
 /// no framing for is [`Error::UnknownCodec`], and the caller says so in
 /// its own words.
+///
+/// The names taken are ffmpeg's, and the four character names a sample
+/// entry uses are taken beside them because a catalog and an RFC 6381
+/// codec string spell a stream the second way. They name the codec
+/// here and nothing else: the extradata decides the framing, so `avc1`
+/// and `avc3` are the same answer and so are `hvc1` and `hev1`. A
+/// caller holding a real sample entry wants [`framing_of_entry`],
+/// where the name decides the framing and a record that will not read
+/// is an error.
 pub fn framing_of(codec: &str, extradata: &[u8]) -> Result<Framing> {
     match codec {
-        "h264" | "avc1" => Ok(match configuration_record(extradata, 7) {
+        "h264" | "avc1" | "avc3" => Ok(match configuration_record(extradata, 7) {
             true => Framing::LengthPrefixed {
                 codec: Codec::H264,
                 length_size: avcc_length_size(extradata),
@@ -199,13 +215,75 @@ pub fn framing_of(codec: &str, extradata: &[u8]) -> Result<Framing> {
             },
             false => Framing::AnnexB(Codec::H265),
         }),
-        "av1" => Ok(Framing::Av1),
+        "av1" | "av01" => Ok(Framing::Av1),
         _ => Err(Error::UnknownCodec),
     }
 }
 
 fn configuration_record(extradata: &[u8], least: usize) -> bool {
     extradata.len() >= least && extradata[0] == 1
+}
+
+/// How a track's samples are framed, from its sample entry: the four
+/// characters that name the entry and the configuration record inside
+/// it.
+///
+/// ISO/IEC 14496-15 clause 5.3.4 names the two H.264 entries, `avc1`
+/// and `avc3`, and clause 8.4.3 the two HEVC ones, `hvc1` and `hev1`.
+/// The difference between each pair is where the parameter sets are
+/// allowed to be: `avc1` and `hvc1` keep them in the sample entry,
+/// while `avc3` and `hev1` also allow them in the samples themselves.
+/// Neither pair differs in framing. Every sample of all four is a
+/// series of NAL units each behind a length of `lengthSizeMinusOne`
+/// plus one bytes, which the record declares, so the entry that says
+/// the parameter sets may arrive in band still says the samples are
+/// length-prefixed. `av01`, from the AV1 codec ISO BMFF binding, is
+/// low-overhead OBUs, and its `av1C` record is not read here because
+/// nothing about the framing depends on it.
+///
+/// Unlike [`framing_of`] this never answers [`Framing::AnnexB`]. The
+/// entry has already ruled that out, so a record too short or too
+/// damaged to declare its width is [`Error::Truncated`] or
+/// [`Error::Malformed`]: the width is unknown, which is not the same
+/// as the framing having changed. An entry this crate has no carriage
+/// for is [`Error::UnknownCodec`].
+pub fn framing_of_entry(kind: &[u8; 4], config: &[u8]) -> Result<Framing> {
+    match kind {
+        b"avc1" | b"avc3" => Ok(Framing::LengthPrefixed {
+            codec: Codec::H264,
+            length_size: declared_length_size(config, 4, AVCC_VERSION)?,
+        }),
+        b"hvc1" | b"hev1" => Ok(Framing::LengthPrefixed {
+            codec: Codec::H265,
+            length_size: declared_length_size(config, 21, HVCC_VERSION)?,
+        }),
+        b"av01" => Ok(Framing::Av1),
+        _ => Err(Error::UnknownCodec),
+    }
+}
+
+const AVCC_VERSION: &str = "an avcC whose configuration version is not 1";
+const HVCC_VERSION: &str = "an hvcC whose configuration version is not 1";
+
+/// The length prefix width a record declares at byte `at`, or why it
+/// cannot be read: a record that does not open with configuration
+/// version 1 is not the record the sample entry said it was, and one
+/// that ends before the field says nothing at all.
+fn declared_length_size(record: &[u8], at: usize, version: &'static str) -> Result<usize> {
+    match record.first() {
+        Some(1) => {}
+        Some(_) => {
+            return Err(Error::Malformed {
+                what: version,
+                at: 0,
+            })
+        }
+        None => return Err(Error::Truncated { at }),
+    }
+    match record.get(at) {
+        Some(byte) => Ok(usize::from(byte & 0x3) + 1),
+        None => Err(Error::Truncated { at }),
+    }
 }
 
 impl Framing {
@@ -457,6 +535,166 @@ mod tests {
         assert_eq!(
             framing_of("h264", &[1, 0x42, 0x00]).expect("a framing"),
             Framing::AnnexB(Codec::H264)
+        );
+    }
+
+    #[test]
+    fn a_sample_entry_says_how_its_samples_are_framed() {
+        let mut avcc = vec![1u8, 0x64, 0x00, 0x0d, 0xff, 0xe1, 0x00];
+        for kind in [b"avc1", b"avc3"] {
+            assert_eq!(
+                framing_of_entry(kind, &avcc).expect("a framing"),
+                Framing::LengthPrefixed {
+                    codec: Codec::H264,
+                    length_size: 4
+                },
+                "{}",
+                String::from_utf8_lossy(kind)
+            );
+        }
+        // The width is the record's own, whichever entry carries it.
+        avcc[4] = 0xfd;
+        assert_eq!(
+            framing_of_entry(b"avc3", &avcc).expect("a framing"),
+            Framing::LengthPrefixed {
+                codec: Codec::H264,
+                length_size: 2
+            }
+        );
+
+        let mut hvcc = vec![1u8; 23];
+        hvcc[21] = 0xf3;
+        for kind in [b"hvc1", b"hev1"] {
+            assert_eq!(
+                framing_of_entry(kind, &hvcc).expect("a framing"),
+                Framing::LengthPrefixed {
+                    codec: Codec::H265,
+                    length_size: 4
+                },
+                "{}",
+                String::from_utf8_lossy(kind)
+            );
+        }
+        hvcc[21] = 0xf0;
+        assert_eq!(
+            framing_of_entry(b"hvc1", &hvcc).expect("a framing"),
+            Framing::LengthPrefixed {
+                codec: Codec::H265,
+                length_size: 1
+            }
+        );
+
+        // The AV1 entry frames its samples the same way whatever its
+        // own record says, which is why the record is not read.
+        for config in [&[][..], &[0x81, 0x05][..], &[0xff; 4][..]] {
+            assert_eq!(
+                framing_of_entry(b"av01", config).expect("a framing"),
+                Framing::Av1
+            );
+        }
+
+        // And an entry with no carriage here is refused by name.
+        for kind in [b"vp09", b"vp08", b"mp4a"] {
+            assert_eq!(framing_of_entry(kind, &avcc), Err(Error::UnknownCodec));
+        }
+    }
+
+    #[test]
+    fn a_record_a_sample_entry_promised_and_did_not_deliver_is_an_error() {
+        // Too short to reach the field, at every length, and never
+        // Annex B: the entry ruled that out.
+        let avcc = [1u8, 0x64, 0x00, 0x0d, 0xff];
+        for cut in 0..4 {
+            assert_eq!(
+                framing_of_entry(b"avc1", &avcc[..cut]),
+                Err(Error::Truncated { at: 4 }),
+                "{cut} bytes"
+            );
+        }
+        assert!(framing_of_entry(b"avc1", &avcc).is_ok(), "five is enough");
+
+        let hvcc = vec![1u8; 22];
+        for cut in 0..21 {
+            assert_eq!(
+                framing_of_entry(b"hev1", &hvcc[..cut]),
+                Err(Error::Truncated { at: 21 }),
+                "{cut} bytes"
+            );
+        }
+        assert!(framing_of_entry(b"hev1", &hvcc).is_ok(), "the field is 22");
+
+        // Damaged rather than short: a record that does not open with
+        // configuration version 1 is not the record the entry named.
+        for version in [0u8, 2, 0xff] {
+            let mut damaged = avcc;
+            damaged[0] = version;
+            assert_eq!(
+                framing_of_entry(b"avc3", &damaged),
+                Err(Error::Malformed {
+                    what: "an avcC whose configuration version is not 1",
+                    at: 0
+                })
+            );
+            let mut damaged = hvcc.clone();
+            damaged[0] = version;
+            assert_eq!(
+                framing_of_entry(b"hvc1", &damaged),
+                Err(Error::Malformed {
+                    what: "an hvcC whose configuration version is not 1",
+                    at: 0
+                })
+            );
+        }
+
+        // Random bytes under every entry kind: an answer or an error,
+        // never a panic and never Annex B.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..2000 {
+            let mut bytes = Vec::new();
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            for _ in 0..(seed >> 40) % 40 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                bytes.push((seed >> 33) as u8);
+            }
+            for kind in [b"avc1", b"avc3", b"hvc1", b"hev1", b"av01"] {
+                match framing_of_entry(kind, &bytes) {
+                    Ok(Framing::AnnexB(_)) => panic!("a sample entry framed as Annex B"),
+                    Ok(Framing::LengthPrefixed { length_size, .. }) => {
+                        assert!((1..=4).contains(&length_size))
+                    }
+                    Ok(Framing::Av1) | Err(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_ways_of_asking_differ_where_a_track_needs_them_to() {
+        // What the index package's container reader kept its own
+        // framing for. A pad is asked by codec name and answers from
+        // the extradata; a sample entry is asked by entry name and
+        // answers from the entry.
+        //
+        // Two of the entry kinds are not codec names ffmpeg uses, and
+        // they are taken here as names for the codec, where the
+        // extradata still decides the framing.
+        assert_eq!(
+            framing_of("avc3", &[]).expect("a framing"),
+            Framing::AnnexB(Codec::H264)
+        );
+        assert_eq!(framing_of("av01", &[]).expect("a framing"), Framing::Av1);
+        assert_eq!(framing_of("vp09", &[]), Err(Error::UnknownCodec));
+
+        // And a record too short to read is Annex B to a pad, which is
+        // the right guess for a stream with no extradata and the wrong
+        // one for a sample entry that already said length-prefixed.
+        assert_eq!(
+            framing_of("avc1", &[1, 0x64]).expect("a framing"),
+            Framing::AnnexB(Codec::H264)
+        );
+        assert_eq!(
+            framing_of_entry(b"avc1", &[1, 0x64]),
+            Err(Error::Truncated { at: 4 })
         );
     }
 

@@ -29,8 +29,10 @@ for payload in framing.payloads(&packet, MINE) { /* ... */ }
 
 ```toml
 [dependencies]
-ffrwd-nal = { git = "https://github.com/imbcmdth/ffrwd-nal", tag = "v0.1.0" }
+ffrwd-nal = { git = "https://github.com/imbcmdth/ffrwd-nal", tag = "v0.1.1" }
 ```
+
+[CHANGELOG.md](CHANGELOG.md) says what each tag changed.
 
 ## What it does
 
@@ -55,8 +57,11 @@ check against real x264 output.
 Reading the two records a NAL reader needs. `config` takes the length
 prefix width and the parameter sets out of an `avcC` or `hvcC`, builds
 an `avcC` back from parameter sets the way ffmpeg's own writer does,
-and answers which framing a stream is in. `sps` reads the few SPS
-fields that record repeats, and `codec_string` spells the RFC 6381 name.
+and answers which framing a stream is in: `framing_of` from a pipeline
+pad's codec name and extradata, `framing_of_entry` from a container's
+sample entry, which knows more and is held to it. `sps` reads the few
+SPS fields that record repeats, and `codec_string` spells the RFC 6381
+name.
 
 ## What it leaves to the caller
 
