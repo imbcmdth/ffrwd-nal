@@ -1,0 +1,19 @@
+[package]
+name = "ffrwd-nal"
+version = "0.1.0"
+edition = "2021"
+# The oldest toolchain this is written against. Nothing here uses an API
+# newer than it, so a module built on an older pinned toolchain compiles
+# the crate in without a fight.
+rust-version = "1.87"
+license = "Apache-2.0"
+description = "The byte level of H.264, HEVC and AV1: NAL units, OBUs, SEI messages and the records that frame them."
+
+[lib]
+name = "ffrwd_nal"
+
+[dependencies]
+# None, and that is the point. This compiles into wasm modules and into
+# a packet filter, where a parser crate's own dependency tree is a cost
+# nobody asked for; the whole crate is std-free apart from `alloc` and
+# `std::error::Error`.
